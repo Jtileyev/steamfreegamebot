@@ -1,45 +1,74 @@
 """
 Модуль получения информации о скидках на игры в Steam
-Использует Reddit r/steamdeals JSON API
+Использует Reddit r/steamdeals RSS feed (более надёжный для серверов)
 """
 import requests
 import time
 import random
 import logging
 import re
+import xml.etree.ElementTree as ET
 from typing import List, Dict, Optional
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-# Reddit JSON API для r/steamdeals
-REDDIT_STEAMDEALS_URL = "https://www.reddit.com/r/steamdeals.json"
+# RSS feed более надёжен для серверов (меньше блокировок)
+REDDIT_RSS_URL = "https://www.reddit.com/r/steamdeals/.rss"
+# Fallback на old.reddit (иногда работает лучше)
+REDDIT_OLD_URL = "https://old.reddit.com/r/steamdeals/.json"
 
 # Настройки
 MAX_RETRIES = 3
-RETRY_DELAY = 3
+RETRY_DELAY = 5
 
-# User-Agent обязателен для Reddit API
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+# User-Agent - имитируем RSS reader
+HEADERS_RSS = {
+    "User-Agent": "SteamDealsBot/1.0 (RSS Reader; +https://github.com/steam-deals-bot)",
+    "Accept": "application/rss+xml, application/xml, text/xml",
+}
+
+HEADERS_JSON = {
+    "User-Agent": "SteamDealsBot/1.0 (by /u/steam_deals_notifier)",
     "Accept": "application/json",
-    "Accept-Language": "en-US,en;q=0.9",
 }
 
 
 def random_delay():
     """Случайная задержка между запросами"""
-    time.sleep(random.uniform(1, 2))
+    time.sleep(random.uniform(2, 4))
 
 
-def fetch_reddit_json(url: str, retries: int = MAX_RETRIES) -> Optional[Dict]:
+def fetch_rss_feed(url: str, retries: int = MAX_RETRIES) -> Optional[str]:
     """
-    Загружает JSON с Reddit API
+    Загружает RSS feed
     """
     for attempt in range(retries):
         try:
             random_delay()
-            response = requests.get(url, headers=HEADERS, timeout=30)
+            response = requests.get(url, headers=HEADERS_RSS, timeout=30)
+            response.raise_for_status()
+            return response.text
+            
+        except requests.exceptions.HTTPError as e:
+            logger.warning(f"HTTP ошибка {response.status_code}: {e}")
+        except Exception as e:
+            logger.warning(f"Попытка {attempt + 1}/{retries} RSS не удалась: {e}")
+        
+        if attempt < retries - 1:
+            time.sleep(RETRY_DELAY)
+    
+    return None
+
+
+def fetch_reddit_json(url: str, retries: int = MAX_RETRIES) -> Optional[Dict]:
+    """
+    Загружает JSON с Reddit API (fallback)
+    """
+    for attempt in range(retries):
+        try:
+            random_delay()
+            response = requests.get(url, headers=HEADERS_JSON, timeout=30)
             response.raise_for_status()
             return response.json()
             
@@ -50,7 +79,7 @@ def fetch_reddit_json(url: str, retries: int = MAX_RETRIES) -> Optional[Dict]:
             else:
                 logger.warning(f"HTTP ошибка {response.status_code}: {e}")
         except Exception as e:
-            logger.warning(f"Попытка {attempt + 1}/{retries} не удалась для {url}: {e}")
+            logger.warning(f"Попытка {attempt + 1}/{retries} JSON не удалась: {e}")
         
         if attempt < retries - 1:
             time.sleep(RETRY_DELAY)
@@ -120,7 +149,8 @@ def clean_game_title(title: str) -> str:
 
 def get_deals_from_steamdeals(limit: int = 100) -> List[Dict]:
     """
-    Получает список скидок из r/steamdeals через Reddit JSON API
+    Получает список скидок из r/steamdeals
+    Сначала пробует RSS (надёжнее), затем JSON API
     
     Args:
         limit: Максимальное количество постов для загрузки
@@ -130,19 +160,130 @@ def get_deals_from_steamdeals(limit: int = 100) -> List[Dict]:
     """
     games = []
     
-    url = f"{REDDIT_STEAMDEALS_URL}?limit={limit}"
-    logger.info(f"Загрузка скидок из r/steamdeals (limit={limit})...")
+    # Метод 1: RSS feed (более надёжный для серверов)
+    logger.info(f"Попытка загрузки через RSS feed...")
+    rss_data = fetch_rss_feed(REDDIT_RSS_URL)
     
+    if rss_data:
+        games = parse_rss_feed(rss_data, limit)
+        if games:
+            logger.info(f"RSS: Найдено {len(games)} скидок")
+            return games
+    
+    # Метод 2: old.reddit JSON (fallback)
+    logger.info(f"RSS не удался, пробуем old.reddit JSON...")
+    url = f"{REDDIT_OLD_URL}?limit={limit}"
     data = fetch_reddit_json(url)
     
-    if not data or 'data' not in data:
-        logger.warning("Не удалось получить данные из r/steamdeals")
-        return games
+    if data and 'data' in data:
+        games = parse_json_response(data, limit)
+        if games:
+            logger.info(f"JSON: Найдено {len(games)} скидок")
+            return games
     
+    logger.warning("Не удалось получить данные ни через RSS, ни через JSON")
+    return games
+
+
+def parse_rss_feed(rss_text: str, limit: int) -> List[Dict]:
+    """
+    Парсит RSS feed r/steamdeals
+    """
+    games = []
+    
+    try:
+        # Reddit RSS использует Atom namespace
+        namespaces = {
+            'atom': 'http://www.w3.org/2005/Atom',
+            'media': 'http://search.yahoo.com/mrss/'
+        }
+        
+        root = ET.fromstring(rss_text)
+        entries = root.findall('.//atom:entry', namespaces)
+        
+        logger.info(f"RSS: Получено {len(entries)} записей")
+        
+        for entry in entries[:limit]:
+            try:
+                title = entry.find('atom:title', namespaces)
+                link = entry.find('atom:link', namespaces)
+                content = entry.find('atom:content', namespaces)
+                
+                title_text = title.text if title is not None else ''
+                reddit_url = link.get('href') if link is not None else ''
+                content_html = content.text if content is not None else ''
+                
+                # Извлекаем Steam URL из контента
+                steam_url = extract_steam_url_from_html(content_html)
+                if not steam_url:
+                    continue
+                
+                app_id = extract_steam_app_id(steam_url)
+                if not app_id:
+                    continue
+                
+                discount = extract_discount_from_title(title_text)
+                if not discount:
+                    discount = "Скидка"
+                
+                game_title = clean_game_title(title_text)
+                if not game_title:
+                    game_title = title_text
+                
+                game = {
+                    'app_id': app_id,
+                    'title': game_title,
+                    'steam_url': f"https://store.steampowered.com/app/{app_id}",
+                    'discount': discount,
+                    'end_date': None,
+                    'reddit_score': 0,
+                    'reddit_url': reddit_url,
+                    'created_utc': 0,
+                }
+                
+                if not any(g['app_id'] == app_id for g in games):
+                    games.append(game)
+                    logger.debug(f"RSS: {game_title} ({discount})")
+                    
+            except Exception as e:
+                logger.debug(f"Ошибка парсинга RSS entry: {e}")
+                continue
+                
+    except ET.ParseError as e:
+        logger.error(f"Ошибка парсинга RSS XML: {e}")
+    except Exception as e:
+        logger.error(f"Ошибка обработки RSS: {e}")
+    
+    return games
+
+
+def extract_steam_url_from_html(html: str) -> Optional[str]:
+    """
+    Извлекает Steam URL из HTML контента RSS
+    """
+    patterns = [
+        r'href="(https?://store\.steampowered\.com/app/\d+[^"]*)"',
+        r'(https?://store\.steampowered\.com/app/\d+)',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, html)
+        if match:
+            return match.group(1)
+    
+    return None
+
+
+def parse_json_response(data: Dict, limit: int) -> List[Dict]:
+    """
+    Парсит JSON ответ от Reddit API
+    """
+    games = []
     posts = data.get('data', {}).get('children', [])
-    logger.info(f"Получено {len(posts)} постов из Reddit")
     
-    for post_wrapper in posts:
+    logger.info(f"JSON: Получено {len(posts)} постов")
+    
+    for post_wrapper in posts[:limit]:
         try:
             post = post_wrapper.get('data', {})
             
@@ -185,7 +326,7 @@ def get_deals_from_steamdeals(limit: int = 100) -> List[Dict]:
             # Проверяем на дубликаты (по app_id)
             if not any(g['app_id'] == app_id for g in games):
                 games.append(game)
-                logger.debug(f"Найдена скидка: {game_title} ({discount})")
+                logger.debug(f"JSON: {game_title} ({discount})")
         
         except Exception as e:
             logger.warning(f"Ошибка парсинга поста Reddit: {e}")
@@ -194,7 +335,6 @@ def get_deals_from_steamdeals(limit: int = 100) -> List[Dict]:
     # Сортируем по популярности (score)
     games.sort(key=lambda x: x.get('reddit_score', 0), reverse=True)
     
-    logger.info(f"Найдено {len(games)} уникальных скидок из r/steamdeals")
     return games
 
 
