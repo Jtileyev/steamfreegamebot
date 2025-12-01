@@ -1,0 +1,46 @@
+name: Check Steam Deals
+
+on:
+  schedule:
+    # Каждые 12 часов (в 00:00 и 12:00 UTC)
+    - cron: '0 0,12 * * *'
+  
+  # Возможность запустить вручную
+  workflow_dispatch:
+
+jobs:
+  check-deals:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      
+      - name: Run deal checker
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          MIN_DISCOUNT_PERCENT: ${{ secrets.MIN_DISCOUNT_PERCENT }}
+        run: |
+          python -c "
+          from bot import check_and_notify
+          from database import init_db
+          
+          print('Инициализация базы данных...')
+          init_db()
+          
+          print('Запуск проверки скидок...')
+          games, events = check_and_notify()
+          
+          print(f'Готово! Отправлено: игр - {games}, событий - {events}')
+          "
