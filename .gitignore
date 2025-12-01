@@ -16,6 +16,7 @@ venv/
 env/
 .venv/
 .env/
+path/
 
 # Database
 *.db
