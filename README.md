@@ -1,147 +1,133 @@
-# Steam Free Game Bot 🎮
+# Steam Deals Bot 🎮
 
-Telegram-бот для отслеживания бесплатных игр и распродаж в Steam.
+Telegram-бот для отслеживания скидок на игры в Steam через Reddit r/steamdeals.
 
 ## Функции
 
-- 🎮 Отслеживание бесплатных раздач игр в Steam (скидка 100%)
+- 🔥 Отслеживание скидок в Steam (настраиваемый порог, по умолчанию от -70%)
+- 🎮 Отдельное отслеживание бесплатных раздач (-100%)
 - 🏷️ Уведомления о Steam Sale Events
-- 📊 Хранение истории отправленных уведомлений в PostgreSQL
+- 📊 Хранение истории в SQLite (без внешних зависимостей)
+- 🔄 Умная дедупликация — повторная отправка при увеличении скидки или через N дней
 - ⏰ Автоматическая проверка каждые 12 часов
 
 ## Технологии
 
-- **Python 3.11** - основной язык
-- **BeautifulSoup4 + lxml** - парсинг SteamDB
-- **psycopg2** - работа с PostgreSQL
-- **APScheduler** - планировщик задач
-- **Telegram Bot API** - отправка уведомлений
+- **Python 3.11** — основной язык
+- **requests** — HTTP-запросы к Reddit RSS/JSON
+- **lxml + xml.etree** — парсинг RSS feed
+- **SQLite** — хранение истории уведомлений
+- **APScheduler** — планировщик задач
+- **Telegram Bot API** — отправка уведомлений
 
 ## Структура проекта
 
 ```
-steam_free_game_bot/
-├── config.py           # Загрузка переменных окружения
-├── scraper.py          # Парсинг SteamDB
-├── database.py         # Работа с PostgreSQL
-├── telegram_client.py  # Отправка в Telegram
-├── bot.py              # Основная логика
-├── clock.py            # Планировщик (точка входа)
-├── requirements.txt    # Зависимости
-├── Procfile           # Конфиг для Heroku
-├── runtime.txt        # Версия Python
-└── .env.example       # Пример переменных окружения
+steam-deals-bot/
+├── config.py              # Загрузка переменных окружения
+├── scraper.py             # Парсинг r/steamdeals (RSS + JSON fallback)
+├── database.py            # Работа с SQLite
+├── telegram_client.py     # Отправка в Telegram
+├── bot.py                 # Основная логика
+├── clock.py               # Планировщик (точка входа)
+├── requirements.txt       # Зависимости
+├── steam-deals-bot.service # systemd unit-файл
+├── .env.example           # Пример переменных окружения
+└── data/
+    └── steam_bot.db       # SQLite база (создаётся автоматически)
 ```
 
 ## Установка и запуск
 
-### Шаг 1: Создать Telegram бота
+### 1. Создать Telegram бота
 
 1. Откройте [@BotFather](https://t.me/BotFather) в Telegram
-2. Отправьте команду `/newbot`
-3. Следуйте инструкциям и сохраните токен бота
+2. Отправьте `/newbot`, следуйте инструкциям
+3. Сохраните токен бота
 
-### Шаг 2: Получить Chat ID
+### 2. Получить Chat ID
 
 1. Отправьте боту любое сообщение
 2. Откройте в браузере:
    ```
    https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates
    ```
-3. Найдите `"chat":{"id":123456789}` в JSON-ответе
-4. Сохраните этот ID
+3. Найдите `"chat":{"id":123456789}` — это ваш Chat ID
 
-### Шаг 3: Локальный запуск
+### 3. Локальный запуск
 
 ```bash
-# Клонируйте репозиторий
 git clone <repo-url>
-cd steam_free_game_bot
+cd steam-deals-bot
 
-# Создайте виртуальное окружение
-python -m venv venv
-source venv/bin/activate  # Linux/Mac
-# или
-venv\Scripts\activate     # Windows
+python3 -m venv venv
+source venv/bin/activate
 
-# Установите зависимости
 pip install -r requirements.txt
 
-# Скопируйте и заполните .env
 cp .env.example .env
-# Отредактируйте .env с вашими данными
+# Заполните .env своими данными
 
-# Запустите
-python clock.py
+# Одиночная проверка (тест)
+python3 bot.py
+
+# Запуск с планировщиком (каждые 12 часов)
+python3 clock.py
 ```
 
-### Шаг 4: Настройка базы данных
-
-1. Создайте бесплатную PostgreSQL базу данных на одном из провайдеров (рекомендуется [Neon](https://neon.tech))
-2. Скопируйте connection string
-3. Добавьте его в переменную `DATABASE_URL`
-
-### Шаг 5: Деплой на Heroku
+### 4. Деплой на сервер (systemd)
 
 ```bash
-# Установите Heroku CLI и авторизуйтесь
-heroku login
+# Копируем проект
+sudo mkdir -p /opt/steam-deals-bot
+sudo cp -r . /opt/steam-deals-bot/
 
-# Создайте приложение
-heroku create your-steam-bot-name
+# Создаём пользователя для сервиса
+sudo useradd -r -s /bin/false steam-bot
+sudo chown -R steam-bot:steam-bot /opt/steam-deals-bot
 
-# Установите переменные окружения
-heroku config:set DATABASE_URL="postgresql://user:pass@host/dbname?sslmode=require"
-heroku config:set TELEGRAM_BOT_TOKEN=your_token_here
-heroku config:set TELEGRAM_CHAT_ID=your_chat_id_here
+# Заполняем .env
+sudo cp /opt/steam-deals-bot/.env.example /opt/steam-deals-bot/.env
+sudo nano /opt/steam-deals-bot/.env
 
-# Деплой
-git push heroku main
+# Устанавливаем зависимости
+pip3 install -r /opt/steam-deals-bot/requirements.txt
 
-# Запустите worker
-heroku ps:scale clock=1
-
-# Просмотр логов
-heroku logs --tail
+# Устанавливаем и запускаем сервис
+sudo cp /opt/steam-deals-bot/steam-deals-bot.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable steam-deals-bot
+sudo systemctl start steam-deals-bot
 ```
 
-### Альтернатива: Деплой на Railway
+### Управление сервисом
 
 ```bash
-# Railway автоматически создаст PostgreSQL
-railway login
-railway init
-railway add postgresql
-railway up
+sudo systemctl status steam-deals-bot    # Статус
+sudo systemctl restart steam-deals-bot   # Перезапуск
+sudo systemctl stop steam-deals-bot      # Остановка
+sudo journalctl -u steam-deals-bot -f    # Логи в реальном времени
 ```
 
 ## Переменные окружения
 
-| Переменная | Описание |
-|------------|----------|
-| `DATABASE_URL` | PostgreSQL connection string (см. примеры ниже) |
-| `TELEGRAM_BOT_TOKEN` | Токен бота от @BotFather |
-| `TELEGRAM_CHAT_ID` | ID чата для отправки уведомлений |
-
-### Бесплатные облачные PostgreSQL провайдеры
-
-| Провайдер | Бесплатный план | Формат URL |
-|-----------|-----------------|------------|
-| [Neon](https://neon.tech) | 0.5 GB | `postgresql://user:pass@ep-xxx.region.aws.neon.tech/dbname?sslmode=require` |
-| [Supabase](https://supabase.com) | 500 MB | `postgresql://postgres:pass@db.xxx.supabase.co:5432/postgres` |
-| [Railway](https://railway.app) | $5 кредит | `postgresql://postgres:pass@xxx.railway.app:5432/railway` |
-| [ElephantSQL](https://elephantsql.com) | 20 MB | `postgresql://user:pass@xxx.db.elephantsql.com/dbname` |
-| [Render](https://render.com) | 90 дней | `postgresql://user:pass@xxx.oregon-postgres.render.com/dbname` |
+| Переменная | Описание | По умолчанию |
+|------------|----------|--------------|
+| `DATABASE_PATH` | Путь к файлу SQLite | `data/steam_bot.db` |
+| `TELEGRAM_BOT_TOKEN` | Токен бота от @BotFather | — (обязательно) |
+| `TELEGRAM_CHAT_ID` | ID чата для уведомлений | — (обязательно) |
+| `MIN_DISCOUNT_PERCENT` | Минимальный порог скидки (%) | `70` |
 
 ## Шаблоны сообщений
 
-### Бесплатная игра
+### Скидка на игру
 ```
-🎮 Бесплатная игра в Steam!
+🔥 Скидка -90% в Steam!
 
-**Название игры**
-🔗 Получить в Steam
-⏰ До: дата окончания
+Название игры
+🔗 Купить в Steam
+👍 Reddit: 150
+💬 Обсуждение
 ```
 
 ### Steam Sale Event
@@ -149,7 +135,7 @@ railway up
 🔥 АКТИВНО СЕЙЧАС!
 🏷️ Steam Sale Event
 
-**Название события**
+Название события
 📅 даты проведения
 🔗 Подробнее на SteamDB
 ```
@@ -157,17 +143,14 @@ railway up
 ## Разработка
 
 ```bash
-# Запуск одиночной проверки (для тестирования)
-python bot.py
+# Одиночная проверка
+python3 bot.py
 
-# Тест парсера
-python scraper.py
-
-# Тест базы данных
-python database.py
+# Тест скрапера
+python3 scraper.py
 
 # Тест форматирования сообщений
-python telegram_client.py
+python3 telegram_client.py
 ```
 
 ## Лицензия
