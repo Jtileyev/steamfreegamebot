@@ -5,9 +5,9 @@ After=network.target
 [Service]
 Type=simple
 User=steam-bot
-WorkingDirectory=/opt/steam-deals-bot
-EnvironmentFile=/opt/steam-deals-bot/.env
-ExecStart=/usr/bin/python3 clock.py
+WorkingDirectory=/var/www/steamfreegamebot
+EnvironmentFile=/var/www/steamfreegamebot/.env
+ExecStart=/var/www/steamfreegamebot/venv/bin/python3 clock.py
 Restart=on-failure
 RestartSec=30
 
