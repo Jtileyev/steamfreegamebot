@@ -38,81 +38,58 @@
 1. `ExecStart` указывал на `venv/bin/python3`, а каталога `venv` не существовало.
 2. `User=steam-bot` указывал на несуществующего пользователя.
 3. Каталог `data/` и файл базы принадлежали root. Сервисный пользователь не смог бы писать в базу, `init_db` упал бы.
-4. При ошибке конфига или базы [clock.py](../clock.py#L52) выходит с кодом 0. `Restart=on-failure` такой выход не перезапускает, и сервис молча останавливается.
+4. При ошибке конфига или базы `clock.py` выходил с кодом 0. `Restart=on-failure` такой выход не перезапускает, и сервис молча останавливался. Исправлено: теперь код выхода 1.
 
 ## Развёртывание на VPS
 
-Пути ниже используют `/opt/steam-deals-bot`. Если выберете другой, замените везде, включая юнит.
+Боевой сервер это та же машина, где лежит рабочая копия: `/home/ubuntu/projects/steamfreegamebot`, пользователь `ubuntu`. Сервис работает от `ubuntu`: домашний каталог закрыт для других пользователей (права 750), поэтому отдельный сервисный пользователь до кода не доберётся.
 
-### 1. Пользователь и код
-
-Репозиторий приватный. Для клонирования на сервере нужен deploy key или SSH-ключ с доступом к репозиторию.
+### 1. Окружение
 
 ```bash
-sudo useradd --system --home-dir /opt/steam-deals-bot --shell /usr/sbin/nologin steam-bot
-sudo git clone git@github.com:Jtileyev/steamfreegamebot.git /opt/steam-deals-bot
-cd /opt/steam-deals-bot
-```
-
-### 2. Окружение
-
-```bash
+cd /home/ubuntu/projects/steamfreegamebot
 sudo apt install -y python3-venv
-sudo python3 -m venv venv
-sudo venv/bin/pip install -r requirements.txt
+python3 -m venv venv
+venv/bin/pip install -r requirements.txt
+mkdir -p data
 ```
 
-### 3. Секреты и права
+Каталог `data/` должен существовать до запуска юнита: без него `ReadWritePaths` не даст сервису стартовать.
+
+### 2. Секреты
 
 ```bash
-sudo cp .env.example .env
-sudo nano .env
-
-sudo chown root:steam-bot .env
-sudo chmod 640 .env
-
-sudo mkdir -p data
-sudo chown steam-bot:steam-bot data
+cp .env.example .env
+nano .env
+chmod 600 .env
 ```
-
-`.env` должен быть читаем для группы сервиса. systemd читает `EnvironmentFile` от root, но [config.py](../config.py#L7) дополнительно вызывает `load_dotenv()` уже от имени сервисного пользователя. Если файл недоступен, импорт упадёт с `PermissionError`.
 
 Токен бота надо выпустить заново через @BotFather командой `/revoke`. Старый токен семь месяцев лежал в файле с правами 644 и мог попадать в логи при сетевых ошибках.
 
-### 4. Юнит
+### 3. Проверка отбора до первого цикла
 
-`/etc/systemd/system/steam-deals-bot.service`:
+Первый цикл сервиса помечает все текущие скидки известными без отправки. Регион, пороги, исключаемые теги и `STEAM_MAX_PAGES` в `.env` лучше выбрать до запуска сервиса. Если поменять их позже, старые скидки тоже не разошлются: цикл пометит известными те, что подходят только под новые настройки, и пришлёт одно служебное сообщение. Скидки, которые прошли бы и старые настройки, отправляются как обычно.
 
-```ini
-[Unit]
-Description=Steam Deals Telegram Bot
-After=network-online.target
-Wants=network-online.target
+Проверить отбор без отправки и без записи в базу:
 
-[Service]
-Type=simple
-User=steam-bot
-Group=steam-bot
-WorkingDirectory=/opt/steam-deals-bot
-EnvironmentFile=/opt/steam-deals-bot/.env
-Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/steam-deals-bot/venv/bin/python clock.py
-Restart=on-failure
-RestartSec=30
-
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-PrivateTmp=true
-ReadWritePaths=/opt/steam-deals-bot/data
-
-[Install]
-WantedBy=multi-user.target
+```bash
+venv/bin/python bot.py --dry-run
 ```
 
-`Restart=on-failure` работает правильно только после исправления кода выхода в `clock.py`. До исправления поставьте `Restart=always`.
+Команда покажет число страниц, сколько скидок прошло фильтр и результат контроля фильтра языка.
 
-`ProtectSystem=strict` делает всю файловую систему доступной только на чтение, кроме `ReadWritePaths`. Если бот начнёт писать куда-то ещё, например в лог-файл, добавьте путь туда.
+### 4. Юнит
+
+Юнит лежит в репозитории: [steam-deals-bot.service](../steam-deals-bot.service).
+
+```bash
+sudo cp steam-deals-bot.service /etc/systemd/system/
+sudo systemd-analyze verify /etc/systemd/system/steam-deals-bot.service
+```
+
+`ProtectSystem=strict` и `ProtectHome=read-only` делают всю файловую систему, включая `/home`, доступной только на чтение, кроме `ReadWritePaths`. Бот пишет только в `data/`: базу, её файлы `-wal` и `-shm` и файл блокировки цикла `steam_bot.db.lock`. Если бот начнёт писать куда-то ещё, например в лог-файл, добавьте путь туда.
+
+Если `.env` содержит ошибку или база недоступна на запись, процесс выходит с кодом 1 и systemd перезапускает его каждые 30 секунд. Циклы в этом состоянии не идут, поэтому heartbeat в Telegram не придёт. Проверяйте `systemctl status` после каждого изменения.
 
 ### 5. Запуск
 
@@ -123,12 +100,30 @@ sudo systemctl status steam-deals-bot
 sudo journalctl -u steam-deals-bot -f
 ```
 
-### 6. Первый запуск
+Первый цикл начинается сразу после старта. На пустой базе бот ничего не рассылает: текущие скидки помечаются известными, в чат приходит одно сообщение о запуске. Уведомления пойдут со следующего цикла, только о новых и изменившихся скидках. В логе каждого цикла есть строка `Итог цикла`.
 
-На пустой базе бот сразу отправит все подходящие скидки. На поиске Steam это около двух десятков сообщений за раз. Если это нежелательно, перед первым запуском нужен режим, который помечает текущие скидки отправленными без публикации. Такого режима пока нет, он в [04-roadmap.md](04-roadmap.md).
+### 6. Ручной запуск рядом с сервисом
+
+Одиночный цикл запускайте от `ubuntu`, без `sudo`:
+
+```bash
+venv/bin/python bot.py
+```
+
+Запуск через `sudo` создаст базу от root, и сервис не сможет в неё писать. Одновременный цикл сервиса и ручного запуска исключён блокировкой: второй просто пропускается с предупреждением в логе.
+
+### 7. Обновление
+
+```bash
+cd /home/ubuntu/projects/steamfreegamebot
+git pull
+venv/bin/pip install -r requirements.txt
+venv/bin/python bot.py --dry-run
+sudo systemctl restart steam-deals-bot
+```
 
 ## Сеть
 
 Reddit ограничивает запросы на один IP-адрес очень жёстко, а к адресам дата-центров относится хуже, чем к домашним. На VPS RSS-лента может отвечать 403 или 429 чаще, чем на старом сервере. Это ещё один довод за переход на поиск Steam.
 
-Steam отвечает 429 после примерно трёх запросов подряд с интервалом в секунду. Бот делает один запрос за цикл и лимит не затрагивает. При ручной отладке делайте паузы между запросами.
+Steam отвечает 429 после примерно трёх запросов подряд с интервалом в секунду. Бот делает паузу 12 секунд между запросами одного цикла: 12 страниц подряд с такой паузой прошли без 429. При ручной отладке делайте паузы между запросами.

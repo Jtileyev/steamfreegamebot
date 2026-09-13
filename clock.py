@@ -1,90 +1,80 @@
 """
-Планировщик задач - запуск проверки каждые 12 часов
+Планировщик задач - запуск проверки каждые CHECK_INTERVAL_HOURS часов
 """
 import logging
+import sys
+from datetime import datetime
+
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 import pytz
 
+import config
 from bot import check_and_notify
 from database import init_db
-from config import validate_config
-
-# Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler()
-    ]
-)
+from logging_setup import setup_logging
 
 logger = logging.getLogger(__name__)
-
-# Отключаем избыточное логирование от APScheduler
-logging.getLogger('apscheduler').setLevel(logging.WARNING)
 
 
 def job_check_and_notify():
     """
-    Обертка для задачи с обработкой ошибок
+    Обертка для задачи: исключение не должно остановить планировщик
     """
     try:
-        logger.info("Запуск задачи проверки бесплатных игр и событий")
-        games, events = check_and_notify()
-        logger.info(f"Задача завершена. Отправлено: игр - {games}, событий - {events}")
+        check_and_notify()
     except Exception as e:
         logger.error(f"Ошибка выполнения задачи: {e}", exc_info=True)
 
 
 def main():
     """
-    Главная функция - запуск планировщика
+    Главная функция - запуск планировщика.
+    Ошибка запуска завершает процесс с кодом 1, чтобы systemd перезапустил сервис.
     """
-    logger.info("=== Запуск Steam Free Game Bot ===")
-    
+    setup_logging()
+    logger.info("=== Запуск Steam Deals Bot ===")
+
     # Проверяем конфигурацию
     try:
-        validate_config()
+        config.validate_config()
         logger.info("Конфигурация проверена успешно")
     except EnvironmentError as e:
         logger.error(f"Ошибка конфигурации: {e}")
-        return
-    
+        sys.exit(1)
+
     # Инициализируем базу данных
     try:
         init_db()
         logger.info("База данных инициализирована")
     except Exception as e:
-        logger.error(f"Ошибка инициализации БД: {e}")
-        return
-    
-    # Создаем планировщик
+        logger.error(f"Ошибка инициализации БД: {e}", exc_info=True)
+        sys.exit(1)
+
     scheduler = BlockingScheduler(timezone=pytz.UTC)
-    
-    # Добавляем задачу с интервалом 12 часов
+
+    # Первый запуск сразу, дальше с интервалом
     scheduler.add_job(
         job_check_and_notify,
-        trigger=IntervalTrigger(hours=12),
-        id='check_free_games',
-        name='Проверка бесплатных игр и событий',
-        replace_existing=True
+        trigger=IntervalTrigger(hours=config.CHECK_INTERVAL_HOURS, timezone=pytz.UTC),
+        id='check_deals',
+        name='Проверка скидок Steam',
+        replace_existing=True,
+        next_run_time=datetime.now(pytz.UTC),
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,
     )
-    
-    logger.info("Планировщик настроен (интервал: 12 часов)")
-    
-    # Немедленный запуск при старте
-    logger.info("Выполняем первоначальную проверку...")
-    job_check_and_notify()
-    
-    # Запускаем планировщик
+
+    logger.info(f"Планировщик настроен (интервал: {config.CHECK_INTERVAL_HOURS} ч)")
+
     try:
-        logger.info("Запуск планировщика...")
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):
         logger.info("Планировщик остановлен")
     except Exception as e:
         logger.error(f"Критическая ошибка планировщика: {e}", exc_info=True)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

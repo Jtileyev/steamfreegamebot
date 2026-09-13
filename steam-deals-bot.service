@@ -1,15 +1,25 @@
+# Установка описана в docs/03-hosting.md.
 [Unit]
 Description=Steam Deals Telegram Bot
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-User=steam-bot
-WorkingDirectory=/var/www/steamfreegamebot
-EnvironmentFile=/var/www/steamfreegamebot/.env
-ExecStart=/var/www/steamfreegamebot/venv/bin/python3 clock.py
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/projects/steamfreegamebot
+EnvironmentFile=/home/ubuntu/projects/steamfreegamebot/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ubuntu/projects/steamfreegamebot/venv/bin/python clock.py
 Restart=on-failure
 RestartSec=30
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ReadWritePaths=/home/ubuntu/projects/steamfreegamebot/data
 
 [Install]
 WantedBy=multi-user.target
